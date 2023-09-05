@@ -1,12 +1,3 @@
-/* Record WAV file to SD Card
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
-
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,6 +21,7 @@
 #include "filter_resample.h"
 #include "input_key_service.h"
 #include "audio_idf_version.h"
+#include <mp3_decoder.h>
 
 #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 1, 0))
 #include "esp_netif.h"
@@ -54,6 +46,12 @@ static EventGroupHandle_t EXIT_FLAG;
 audio_pipeline_handle_t pipeline;
 audio_element_handle_t i2s_stream_reader;
 audio_element_handle_t http_stream_writer;
+audio_pipeline_handle_t play_pipeline;
+audio_element_handle_t i2s_stream_writer, mp3_decoder;  // 재생을 위한 추가 오디오 요소
+
+// 재생을 위한 추가 오디오 요소
+audio_element_handle_t mp3_decoder;
+ringbuf_handle_t mp3_ringbuf;  // 재생을 위한 Ring Buffer 추가
 
 esp_err_t _http_stream_event_handle(http_stream_event_msg_t *msg)
 {
@@ -143,6 +141,12 @@ static esp_err_t input_key_service_cb(periph_service_handle_t handle, periph_ser
                 audio_element_set_uri(http_stream_writer, CONFIG_SERVER_URI);
                 audio_pipeline_run(pipeline);
                 break;
+
+            case INPUT_KEY_USER_ID_PLAY:  // 새로운 재생 버튼
+                ESP_LOGE(TAG, "[ * ] [Play] input key event, start playing ...");
+                audio_element_set_uri(i2s_stream_writer, CONFIG_SERVER_URI); 
+                audio_pipeline_run(play_pipeline);
+                break;
         }
     } else if (evt->type == INPUT_KEY_SERVICE_ACTION_CLICK_RELEASE || evt->type == INPUT_KEY_SERVICE_ACTION_PRESS_RELEASE) {
         switch ((int)evt->data) {
@@ -201,6 +205,24 @@ void app_main(void)
     ESP_LOGI(TAG, "[3.0] Create audio pipeline for recording");
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
     pipeline = audio_pipeline_init(&pipeline_cfg);
+
+    audio_pipeline_cfg_t play_pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
+    play_pipeline = audio_pipeline_init(&play_pipeline_cfg);
+
+    i2s_stream_cfg_t i2s_writer_cfg = I2S_STREAM_CFG_DEFAULT();
+    i2s_writer_cfg.type = AUDIO_STREAM_WRITER;
+    i2s_stream_writer = i2s_stream_init(&i2s_writer_cfg);
+
+    // Initialize MP3 decoder
+    mp3_decoder_cfg_t mp3_decoder_cfg = DEFAULT_MP3_DECODER_CONFIG();
+    mp3_decoder = mp3_decoder_init(&mp3_decoder_cfg);
+
+    // Ring Buffer 초기화 (재생을 위한)
+    mp3_ringbuf = rb_create(8 * 1024, 1);
+
+    // Ring Buffer 설정 (재생을 위한)
+    audio_element_set_output_ringbuf(mp3_decoder, mp3_ringbuf);
+
     mem_assert(pipeline);
 
     ESP_LOGI(TAG, "[3.1] Create http stream to post data to server");
@@ -220,10 +242,20 @@ void app_main(void)
     ESP_LOGI(TAG, "[3.3] Register all elements to audio pipeline");
     audio_pipeline_register(pipeline, i2s_stream_reader, "i2s");
     audio_pipeline_register(pipeline, http_stream_writer, "http");
+    audio_pipeline_register(play_pipeline, i2s_stream_writer, "i2s_writer");
+    audio_pipeline_register(play_pipeline, mp3_decoder, "mp3");
 
     ESP_LOGI(TAG, "[3.4] Link it together [codec_chip]-->i2s_stream->http_stream-->[http_server]");
     const char *link_tag[2] = {"i2s", "http"};
     audio_pipeline_link(pipeline, &link_tag[0], 2);
+
+    // 재생을 위한 파이프라인 링크
+    ESP_LOGI(TAG, "[3.5] Link it together [http_server]-->i2s_stream-->[codec_chip]");
+    const char *play_link_tag[2] = {"mp3", "i2s_writer"};
+    audio_pipeline_link(play_pipeline, &play_link_tag[0], 2);
+
+    // 재생 데이터 소스 설정
+    audio_element_set_uri(mp3_decoder, CONFIG_SERVER_URI); 
 
     // Initialize Button peripheral
     audio_board_key_init(set);
@@ -241,21 +273,30 @@ void app_main(void)
 
     ESP_LOGI(TAG, "[ 5 ] Stop audio_pipeline");
     audio_pipeline_stop(pipeline);
+    audio_pipeline_stop(play_pipeline);
     audio_pipeline_wait_for_stop(pipeline);
+    audio_pipeline_wait_for_stop(play_pipeline);
     audio_pipeline_terminate(pipeline);
+    audio_pipeline_terminate(play_pipeline);
 
     audio_pipeline_unregister(pipeline, http_stream_writer);
+    audio_pipeline_unregister(play_pipeline, mp3_decoder);
     audio_pipeline_unregister(pipeline, i2s_stream_reader);
+    audio_pipeline_unregister(play_pipeline, i2s_stream_writer);
 
     /* Terminal the pipeline before removing the listener */
     audio_pipeline_remove_listener(pipeline);
+    audio_pipeline_remove_listener(play_pipeline);
 
     /* Stop all periph before removing the listener */
     esp_periph_set_stop_all(set);
 
     /* Release all resources */
     audio_pipeline_deinit(pipeline);
+    audio_pipeline_deinit(play_pipeline);
     audio_element_deinit(http_stream_writer);
+    audio_element_deinit(i2s_stream_writer);
     audio_element_deinit(i2s_stream_reader);
+    audio_element_deinit(mp3_decoder);
     esp_periph_set_destroy(set);
 }

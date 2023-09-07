@@ -1,6 +1,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
@@ -15,13 +16,14 @@
 #include "http_stream.h"
 #include "i2s_stream.h"
 #include "wav_encoder.h"
+#include "mp3_decoder.h"
 #include "esp_peripherals.h"
 #include "periph_button.h"
 #include "periph_wifi.h"
 #include "filter_resample.h"
 #include "input_key_service.h"
 #include "audio_idf_version.h"
-#include <mp3_decoder.h>
+#include "nvs_flash.h"
 
 #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 1, 0))
 #include "esp_netif.h"
@@ -29,32 +31,48 @@
 #include "tcpip_adapter.h"
 #endif
 
-static const char *TAG = "REC_RAW_HTTP";
-
+#define CONFIG_WIFI_SSID "pinklab"      
+#define CONFIG_WIFI_PASSWORD "pinkwink"
+#define CONFIG_SERVER_URI "http://192.168.0.19:8000/upload"  
 
 #define EXAMPLE_AUDIO_SAMPLE_RATE  (16000)
 #define EXAMPLE_AUDIO_BITS         (16)
 #define EXAMPLE_AUDIO_CHANNELS     (1)
 
-#define DEMO_EXIT_BIT (BIT0)
+static const char *TAG = "AUDIO_APP";
 
-#define CONFIG_WIFI_SSID "pinklab"        // Replace with your actual WiFi SSID
-#define CONFIG_WIFI_PASSWORD "pinkwink"  // Replace with your actual WiFi password
-
-static EventGroupHandle_t EXIT_FLAG;
-
-audio_pipeline_handle_t pipeline;
-audio_element_handle_t i2s_stream_reader;
-audio_element_handle_t http_stream_writer;
-audio_pipeline_handle_t play_pipeline;
-audio_element_handle_t i2s_stream_writer, mp3_decoder;  // 재생을 위한 추가 오디오 요소
-
-// 재생을 위한 추가 오디오 요소
+// Global variables for pipeline and elements
+audio_pipeline_handle_t record_pipeline, playback_pipeline;
+audio_element_handle_t i2s_stream_reader, i2s_stream_writer;
+audio_element_handle_t http_stream_writer, http_stream_reader;
 audio_element_handle_t mp3_decoder;
-ringbuf_handle_t mp3_ringbuf;  // 재생을 위한 Ring Buffer 추가
+
+// State management
+typedef enum {
+    APP_STATE_IDLE,
+    APP_STATE_RECORDING,
+    APP_STATE_PLAYBACK
+} app_state_t;
+
+app_state_t app_state = APP_STATE_IDLE;
+
+// Wi-Fi 이벤트 핸들러 추가
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                                int32_t event_id, void* event_data)
+{
+    if (event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGI(TAG, "Wi-Fi disconnected, trying to reconnect...");
+        esp_wifi_connect();
+    } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+        ESP_LOGI(TAG, "Wi-Fi connected");
+    }
+}
 
 esp_err_t _http_stream_event_handle(http_stream_event_msg_t *msg)
 {
+    ESP_LOGI(TAG, "[HTTP Event] Event ID: %d", msg->event_id);
     esp_http_client_handle_t http = (esp_http_client_handle_t)msg->http_client;
     char len_buf[16];
     static int total_write = 0;
@@ -118,144 +136,97 @@ esp_err_t _http_stream_event_handle(http_stream_event_msg_t *msg)
     return ESP_OK;
 }
 
+// Event handler for button events
 static esp_err_t input_key_service_cb(periph_service_handle_t handle, periph_service_event_t *evt, void *ctx)
 {
-    audio_element_handle_t http_stream_writer = (audio_element_handle_t)ctx;
     if (evt->type == INPUT_KEY_SERVICE_ACTION_CLICK) {
         switch ((int)evt->data) {
-            case INPUT_KEY_USER_ID_MODE:
-                ESP_LOGW(TAG, "[ * ] [Set] input key event, exit the demo ...");
-                xEventGroupSetBits(EXIT_FLAG, DEMO_EXIT_BIT);
-                break;
             case INPUT_KEY_USER_ID_REC:
-                ESP_LOGE(TAG, "[ * ] [Rec] input key event, resuming pipeline ...");
-                /*
-                 * There is no effect when follow APIs output warning message on the first time record
-                 */
-                audio_pipeline_stop(pipeline);
-                audio_pipeline_wait_for_stop(pipeline);
-                audio_pipeline_reset_ringbuffer(pipeline);
-                audio_pipeline_reset_elements(pipeline);
-                audio_pipeline_terminate(pipeline);
+                if (app_state == APP_STATE_IDLE) {
+                    ESP_LOGI(TAG, "[ * ] [Rec] Start recording...");
+                     // 서버 접근성 확인 로그
+                    ESP_LOGI(TAG, "Attempting to connect to server: %s", CONFIG_SERVER_URI);
+                    app_state = APP_STATE_RECORDING;
+                    // URI 설정
+                    audio_element_set_uri(http_stream_writer, CONFIG_SERVER_URI);
 
-                audio_element_set_uri(http_stream_writer, CONFIG_SERVER_URI);
-                audio_pipeline_run(pipeline);
+                    audio_pipeline_run(record_pipeline);
+                }
                 break;
-
-            case INPUT_KEY_USER_ID_PLAY:  // 새로운 재생 버튼
-                ESP_LOGE(TAG, "[ * ] [Play] input key event, start playing ...");
-                audio_element_set_uri(i2s_stream_writer, CONFIG_SERVER_URI); 
-                audio_pipeline_run(play_pipeline);
+            case INPUT_KEY_USER_ID_PLAY:
+                if (app_state == APP_STATE_IDLE) {
+                    ESP_LOGI(TAG, "[ * ] [Play] Start playback...");
+                    app_state = APP_STATE_PLAYBACK;
+                    audio_pipeline_run(playback_pipeline);
+                }
                 break;
         }
-    } else if (evt->type == INPUT_KEY_SERVICE_ACTION_CLICK_RELEASE || evt->type == INPUT_KEY_SERVICE_ACTION_PRESS_RELEASE) {
+    } else if (evt->type == INPUT_KEY_SERVICE_ACTION_CLICK_RELEASE) {
         switch ((int)evt->data) {
             case INPUT_KEY_USER_ID_REC:
-                ESP_LOGE(TAG, "[ * ] [Rec] key released, stop pipeline ...");
-                /*
-                 * Set the i2s_stream_reader ringbuffer is done to flush the buffering voice data.
-                 */
-                audio_element_set_ringbuf_done(i2s_stream_reader);
+                if (app_state == APP_STATE_RECORDING) {
+                    ESP_LOGI(TAG, "[ * ] [Rec] Stop recording...");
+                    app_state = APP_STATE_IDLE;
+                    audio_pipeline_stop(record_pipeline);
+                    audio_pipeline_wait_for_stop(record_pipeline);
+                }
+                break;
+            case INPUT_KEY_USER_ID_PLAY:
+                if (app_state == APP_STATE_PLAYBACK) {
+                    ESP_LOGI(TAG, "[ * ] [Play] Stop playback...");
+                    app_state = APP_STATE_IDLE;
+                    audio_pipeline_stop(playback_pipeline);
+                    audio_pipeline_wait_for_stop(playback_pipeline);
+                }
                 break;
         }
     }
-
     return ESP_OK;
 }
 
 void app_main(void)
 {
-    esp_log_level_set("*", ESP_LOG_WARN);
-    esp_log_level_set(TAG, ESP_LOG_INFO);
+    ESP_LOGI(TAG, "[APP] Starting app main");  // 로그 추가
+    // 메모리 사용량 확인
+    ESP_LOGI(TAG, "Initial free heap size: %d bytes", esp_get_free_heap_size());
 
-    EXIT_FLAG = xEventGroupCreate();
-
+    // Initialize NVS for Wi-Fi configuration storage
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
-        // NVS partition was truncated and needs to be erased
-        // Retry nvs_flash_init
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
-#if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 1, 0))
-    ESP_ERROR_CHECK(esp_netif_init());
-#else
-    tcpip_adapter_init();
-#endif
+    ESP_ERROR_CHECK(err);
 
-    ESP_LOGI(TAG, "[ 1 ] Initialize Button Peripheral & Connect to wifi network");
-    // Initialize peripherals management
+    // TCP/IP 스택 초기화
+    esp_netif_init();
+
+    // Wi-Fi 설정 구조체 초기화
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    
+    // Wi-Fi 모듈 초기화
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    // Wi-Fi 모드 설정
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    // Wi-Fi 시작
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Wi-Fi 이벤트 핸들러 등록
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+
+    // Initialize peripherals and Wi-Fi
     esp_periph_config_t periph_cfg = DEFAULT_ESP_PERIPH_SET_CONFIG();
     esp_periph_set_handle_t set = esp_periph_set_init(&periph_cfg);
-
     periph_wifi_cfg_t wifi_cfg = {
         .ssid = CONFIG_WIFI_SSID,
         .password = CONFIG_WIFI_PASSWORD,
     };
     esp_periph_handle_t wifi_handle = periph_wifi_init(&wifi_cfg);
 
-    // Start wifi & button peripheral
     esp_periph_start(set, wifi_handle);
     periph_wifi_wait_for_connected(wifi_handle, portMAX_DELAY);
-
-    ESP_LOGI(TAG, "[ 2 ] Start codec chip");
-    audio_board_handle_t board_handle = audio_board_init();
-    audio_hal_ctrl_codec(board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_ENCODE, AUDIO_HAL_CTRL_START);
-
-    ESP_LOGI(TAG, "[3.0] Create audio pipeline for recording");
-    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
-    pipeline = audio_pipeline_init(&pipeline_cfg);
-
-    audio_pipeline_cfg_t play_pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
-    play_pipeline = audio_pipeline_init(&play_pipeline_cfg);
-
-    i2s_stream_cfg_t i2s_writer_cfg = I2S_STREAM_CFG_DEFAULT();
-    i2s_writer_cfg.type = AUDIO_STREAM_WRITER;
-    i2s_stream_writer = i2s_stream_init(&i2s_writer_cfg);
-
-    // Initialize MP3 decoder
-    mp3_decoder_cfg_t mp3_decoder_cfg = DEFAULT_MP3_DECODER_CONFIG();
-    mp3_decoder = mp3_decoder_init(&mp3_decoder_cfg);
-
-    // Ring Buffer 초기화 (재생을 위한)
-    mp3_ringbuf = rb_create(8 * 1024, 1);
-
-    // Ring Buffer 설정 (재생을 위한)
-    audio_element_set_output_ringbuf(mp3_decoder, mp3_ringbuf);
-
-    mem_assert(pipeline);
-
-    ESP_LOGI(TAG, "[3.1] Create http stream to post data to server");
-
-    http_stream_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
-    http_cfg.type = AUDIO_STREAM_WRITER;
-    http_cfg.event_handle = _http_stream_event_handle;
-    http_stream_writer = http_stream_init(&http_cfg);
-
-    ESP_LOGI(TAG, "[3.2] Create i2s stream to read audio data from codec chip");
-    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
-    i2s_cfg.type = AUDIO_STREAM_READER;
-    i2s_cfg.out_rb_size = 16 * 1024; // Increase buffer to avoid missing data in bad network conditions
-    i2s_cfg.i2s_port = CODEC_ADC_I2S_PORT;
-    i2s_stream_reader = i2s_stream_init(&i2s_cfg);
-
-    ESP_LOGI(TAG, "[3.3] Register all elements to audio pipeline");
-    audio_pipeline_register(pipeline, i2s_stream_reader, "i2s");
-    audio_pipeline_register(pipeline, http_stream_writer, "http");
-    audio_pipeline_register(play_pipeline, i2s_stream_writer, "i2s_writer");
-    audio_pipeline_register(play_pipeline, mp3_decoder, "mp3");
-
-    ESP_LOGI(TAG, "[3.4] Link it together [codec_chip]-->i2s_stream->http_stream-->[http_server]");
-    const char *link_tag[2] = {"i2s", "http"};
-    audio_pipeline_link(pipeline, &link_tag[0], 2);
-
-    // 재생을 위한 파이프라인 링크
-    ESP_LOGI(TAG, "[3.5] Link it together [http_server]-->i2s_stream-->[codec_chip]");
-    const char *play_link_tag[2] = {"mp3", "i2s_writer"};
-    audio_pipeline_link(play_pipeline, &play_link_tag[0], 2);
-
-    // 재생 데이터 소스 설정
-    audio_element_set_uri(mp3_decoder, CONFIG_SERVER_URI); 
 
     // Initialize Button peripheral
     audio_board_key_init(set);
@@ -264,39 +235,93 @@ void app_main(void)
     input_cfg.handle = set;
     periph_service_handle_t input_ser = input_key_service_create(&input_cfg);
     input_key_service_add_key(input_ser, input_key_info, INPUT_KEY_NUM);
-    periph_service_set_callback(input_ser, input_key_service_cb, (void *)http_stream_writer);
+    periph_service_set_callback(input_ser, input_key_service_cb, NULL);
 
-    i2s_stream_set_clk(i2s_stream_reader, EXAMPLE_AUDIO_SAMPLE_RATE, EXAMPLE_AUDIO_BITS, EXAMPLE_AUDIO_CHANNELS);
+    // Initialize audio elements and pipelines
+    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
+    record_pipeline = audio_pipeline_init(&pipeline_cfg);
+    playback_pipeline = audio_pipeline_init(&pipeline_cfg);
 
-    ESP_LOGI(TAG, "[ 4 ] Press [Rec] button to record, Press [Mode] to exit");
-    xEventGroupWaitBits(EXIT_FLAG, DEMO_EXIT_BIT, true, false, portMAX_DELAY);
+    http_stream_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
+    http_cfg.type = AUDIO_STREAM_WRITER;
+    http_cfg.event_handle = _http_stream_event_handle;
+    http_stream_writer = http_stream_init(&http_cfg);
+    http_stream_reader = http_stream_init(&http_cfg);
 
-    ESP_LOGI(TAG, "[ 5 ] Stop audio_pipeline");
-    audio_pipeline_stop(pipeline);
-    audio_pipeline_stop(play_pipeline);
-    audio_pipeline_wait_for_stop(pipeline);
-    audio_pipeline_wait_for_stop(play_pipeline);
-    audio_pipeline_terminate(pipeline);
-    audio_pipeline_terminate(play_pipeline);
+    // Initialize I2S stream reader and writer
+    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
+    i2s_cfg.type = AUDIO_STREAM_READER;
+    i2s_cfg.out_rb_size = 16 * 1024; // ring buffer 크기 설정
+    i2s_stream_reader = i2s_stream_init(&i2s_cfg);
+    i2s_stream_writer = i2s_stream_init(&i2s_cfg);
 
-    audio_pipeline_unregister(pipeline, http_stream_writer);
-    audio_pipeline_unregister(play_pipeline, mp3_decoder);
-    audio_pipeline_unregister(pipeline, i2s_stream_reader);
-    audio_pipeline_unregister(play_pipeline, i2s_stream_writer);
+    // Initialize MP3 decoder
+    mp3_decoder_cfg_t mp3_cfg = DEFAULT_MP3_DECODER_CONFIG();
+    mp3_decoder = mp3_decoder_init(&mp3_cfg);
 
-    /* Terminal the pipeline before removing the listener */
-    audio_pipeline_remove_listener(pipeline);
-    audio_pipeline_remove_listener(play_pipeline);
+    // Register elements to recording pipeline
+    audio_pipeline_register(record_pipeline, i2s_stream_reader, "i2s");
+    audio_pipeline_register(record_pipeline, http_stream_writer, "http");
 
-    /* Stop all periph before removing the listener */
-    esp_periph_set_stop_all(set);
+    // Link elements together [I2S]-->http_stream-->[HTTP Server]
+    const char *link_tag_record[2] = {"i2s", "http"};
+    audio_pipeline_link(record_pipeline, &link_tag_record[0], 2);
 
-    /* Release all resources */
-    audio_pipeline_deinit(pipeline);
-    audio_pipeline_deinit(play_pipeline);
-    audio_element_deinit(http_stream_writer);
-    audio_element_deinit(i2s_stream_writer);
-    audio_element_deinit(i2s_stream_reader);
-    audio_element_deinit(mp3_decoder);
-    esp_periph_set_destroy(set);
+    // Register elements to playback pipeline
+    audio_pipeline_register(playback_pipeline, http_stream_reader, "http");
+    audio_pipeline_register(playback_pipeline, mp3_decoder, "mp3");
+    audio_pipeline_register(playback_pipeline, i2s_stream_writer, "i2s");
+
+    // Link elements together [HTTP]-->mp3_decoder-->i2s_stream-->[I2S]
+    const char *link_tag_playback[3] = {"http", "mp3", "i2s"};
+    audio_pipeline_link(playback_pipeline, &link_tag_playback[0], 3);
+
+    // Create an event interface
+    audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
+    audio_event_iface_handle_t evt = audio_event_iface_init(&evt_cfg);
+
+    // Listen for pipeline events
+    audio_pipeline_set_listener(record_pipeline, evt);
+    audio_pipeline_set_listener(playback_pipeline, evt);
+
+    while (1) {
+        ESP_LOGI(TAG, "[APP] Main loop iteration");  // 로그 추가
+
+        // 메모리 사용량 확인
+        ESP_LOGI(TAG, "Current free heap size: %d bytes", esp_get_free_heap_size());
+
+        audio_event_iface_msg_t msg;
+        esp_err_t ret = audio_event_iface_listen(evt, &msg, portMAX_DELAY);
+
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "[ * ] Event interface error : %d", ret);
+            continue;
+        }
+
+        ESP_LOGI(TAG, "[APP] Received message from source type: %d, cmd: %d", msg.source_type, msg.cmd);  // 로그 추가
+        if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT) {
+            if (msg.source == (void *) mp3_decoder && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
+                audio_element_info_t music_info = {0};
+                audio_element_getinfo(mp3_decoder, &music_info);
+                ESP_LOGI(TAG, "[ * ] Receive music info, sample_rates=%d, bits=%d, ch=%d",
+                         music_info.sample_rates, music_info.bits, music_info.channels);
+                i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates, music_info.bits, music_info.channels);
+            }
+
+            if (msg.cmd == AEL_MSG_CMD_REPORT_STATUS) {
+                if ((int)msg.data == AEL_STATUS_STATE_STOPPED) {
+                    ESP_LOGW(TAG, "[ * ] Stop event received");
+                    if (app_state == APP_STATE_RECORDING) {
+                        app_state = APP_STATE_IDLE;
+                        audio_pipeline_stop(record_pipeline);
+                        audio_pipeline_wait_for_stop(record_pipeline);
+                    } else if (app_state == APP_STATE_PLAYBACK) {
+                        app_state = APP_STATE_IDLE;
+                        audio_pipeline_stop(playback_pipeline);
+                        audio_pipeline_wait_for_stop(playback_pipeline);
+                    }
+                }
+            }
+        }
+    }
 }

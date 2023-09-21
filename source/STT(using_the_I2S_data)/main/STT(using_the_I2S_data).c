@@ -41,12 +41,16 @@ bool is_recording = false;  // 녹음 상태를 추적하는 변수
 
 #define CONFIG_WIFI_SSID "pinklab"        // Replace with your actual WiFi SSID
 #define CONFIG_WIFI_PASSWORD "pinkwink"  // Replace with your actual WiFi password
+#define CONFIG_SERVER_URI "http://192.168.0.19:8000/upload"
 
 static EventGroupHandle_t EXIT_FLAG;
 
 audio_pipeline_handle_t pipeline;
 audio_element_handle_t i2s_stream_reader;
 audio_element_handle_t http_stream_writer;
+
+uint8_t audio_data[512];
+size_t bytes_read;
 
 esp_err_t _http_stream_event_handle(http_stream_event_msg_t *msg)
 {
@@ -134,8 +138,8 @@ void check_audio_level_and_record(uint8_t *audio_data, size_t size) {
     ESP_LOGI("RecordingStatus", "Is recording: %s", is_recording ? "true" : "false");
     float level = calculate_audio_level(audio_data, size);
     ESP_LOGI("AudioLevel", "Calculated audio level: %f", level);
-    const float THRESHOLD_START = 0.5;  // 시작 임계값
-    const float THRESHOLD_STOP = 0.2;   // 중지 임계값
+    const float THRESHOLD_START = 1500;  // 시작 임계값
+    const float THRESHOLD_STOP = 300;   // 중지 임계값
 
     if (level > THRESHOLD_START && !is_recording) {
         // 녹음 시작
@@ -148,7 +152,6 @@ void check_audio_level_and_record(uint8_t *audio_data, size_t size) {
         audio_pipeline_wait_for_stop(pipeline);
         audio_pipeline_reset_ringbuffer(pipeline);
         audio_pipeline_reset_elements(pipeline);
-        audio_pipeline_terminate(pipeline);
 
         audio_element_set_uri(http_stream_writer, CONFIG_SERVER_URI);
         ESP_LOGI("PipelineStatus", "Audio pipeline stopped"); 
@@ -160,8 +163,8 @@ void check_audio_level_and_record(uint8_t *audio_data, size_t size) {
 
 void app_main(void)
 {
-    esp_log_level_set("*", ESP_LOG_INFO);
-    esp_log_level_set(TAG, ESP_LOG_INFO);
+    esp_log_level_set("AudioLevel", ESP_LOG_INFO);
+    esp_log_level_set("RecordingStatus", ESP_LOG_INFO);
 
     EXIT_FLAG = xEventGroupCreate();
 
@@ -210,17 +213,17 @@ void app_main(void)
     mem_assert(pipeline);
 
     ESP_LOGI(TAG, "[3.1] Create http stream to post data to server");
-
     http_stream_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
     http_cfg.type = AUDIO_STREAM_WRITER;
     http_cfg.event_handle = _http_stream_event_handle;
     http_stream_writer = http_stream_init(&http_cfg);
-
+    audio_element_set_uri(http_stream_writer, CONFIG_SERVER_URI);  // URI 설정
+    
     ESP_LOGI(TAG, "[3.2] Create i2s stream to read audio data from codec chip");
     i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
     i2s_cfg.type = AUDIO_STREAM_READER;
     i2s_cfg.out_rb_size = 16 * 1024; // Increase buffer to avoid missing data in bad network conditions
-    i2s_cfg.i2s_port = CODEC_ADC_I2S_PORT;
+    i2s_cfg.i2s_port = I2S_NUM_1;
     i2s_stream_reader = i2s_stream_init(&i2s_cfg);
 
 
@@ -235,12 +238,8 @@ void app_main(void)
     i2s_stream_set_clk(i2s_stream_reader, EXAMPLE_AUDIO_SAMPLE_RATE, EXAMPLE_AUDIO_BITS, EXAMPLE_AUDIO_CHANNELS);
 
     while (1) {
-        // I2S에서 오디오 데이터 읽기 (이 부분은 실제 구현에 따라 다를 수 있습니다)
-        uint8_t audio_data[512];
-        size_t bytes_read;
-
         // I2S에서 오디오 데이터 읽기
-        i2s_read((i2s_port_t)i2s_stream_reader, audio_data, sizeof(audio_data), &bytes_read, portMAX_DELAY);
+        i2s_read(I2S_NUM_1, audio_data, sizeof(audio_data), &bytes_read, portMAX_DELAY);
         ESP_LOGI("AudioData", "First 10 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
             audio_data[0], audio_data[1], audio_data[2], audio_data[3],
             audio_data[4], audio_data[5], audio_data[6], audio_data[7],

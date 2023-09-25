@@ -31,7 +31,7 @@
 
 static const char *TAG = "REC_RAW_HTTP";
 
-bool is_recording = false;  // 녹음 상태를 추적하는 변수
+bool is_recording = false;
 
 #define EXAMPLE_AUDIO_SAMPLE_RATE  (16000)
 #define EXAMPLE_AUDIO_BITS         (16)
@@ -101,8 +101,6 @@ esp_err_t _http_stream_event_handle(http_stream_event_msg_t *msg)
     }
 
     if (msg->event_id == HTTP_STREAM_FINISH_REQUEST) {
-        int status_code = esp_http_client_get_status_code(http);
-        ESP_LOGI(TAG, "HTTP Response Code: %d", status_code);
         ESP_LOGI(TAG, "[ + ] HTTP client HTTP_STREAM_FINISH_REQUEST");
         char *buf = calloc(1, 64);
         assert(buf);
@@ -121,50 +119,60 @@ esp_err_t _http_stream_event_handle(http_stream_event_msg_t *msg)
 
 float calculate_audio_level(uint8_t *audio_data, size_t size) {
     float sum = 0.0;
-    int16_t *samples = (int16_t *)audio_data;  // 16비트 샘플로 가정
-    size_t num_samples = size / sizeof(int16_t);  // 샘플 수 계산
+    int16_t *samples = (int16_t *)audio_data;  // 16-bit samples
+    size_t num_samples = size / sizeof(int16_t);  // Calculating the number of samples
 
     for (size_t i = 0; i < num_samples; ++i) {
-        sum += samples[i] * samples[i];  // 제곱을 더함
+        sum += samples[i] * samples[i];
     }
 
-    float mean = sum / num_samples;  // 평균을 계산
-    float rms = sqrt(mean);  // 루트를 씌워 RMS를 계산
-    ESP_LOGI("AudioLevel", "Calculated audio level: %f", rms);
+    float mean = sum / num_samples;  
+    float rms = sqrt(mean); 
+
     return rms;
 }
 
 void check_audio_level_and_record(uint8_t *audio_data, size_t size) {
-    ESP_LOGI("RecordingStatus", "Is recording: %s", is_recording ? "true" : "false");
     float level = calculate_audio_level(audio_data, size);
+<<<<<<< HEAD
     ESP_LOGI("AudioLevel", "Calculated audio level: %f", level);
     const float THRESHOLD_START = 1500;  // 시작 임계값
     const float THRESHOLD_STOP = 300;   // 중지 임계값
+=======
+    const float THRESHOLD_START = 0.5;  // Start Threshold
+    const float THRESHOLD_STOP = 0.2;   // Stop Threshold
+>>>>>>> parent of 33a0248 (STT(using_the_button) - ing)
 
     if (level > THRESHOLD_START && !is_recording) {
-        // 녹음 시작
+        // Start recording
         audio_pipeline_run(pipeline);
-        ESP_LOGI("PipelineStatus", "Audio pipeline started");
         is_recording = true;
     } else if (level < THRESHOLD_STOP && is_recording) {
-        // 녹음 중지
+        // Stop recording
         audio_pipeline_stop(pipeline);
+<<<<<<< HEAD
         audio_pipeline_wait_for_stop(pipeline);
         audio_pipeline_reset_ringbuffer(pipeline);
         audio_pipeline_reset_elements(pipeline);
 
         audio_element_set_uri(http_stream_writer, CONFIG_SERVER_URI);
         ESP_LOGI("PipelineStatus", "Audio pipeline stopped"); 
+=======
+>>>>>>> parent of 33a0248 (STT(using_the_button) - ing)
         is_recording = false;
-        
     }
 }
 
 
 void app_main(void)
 {
+<<<<<<< HEAD
     esp_log_level_set("AudioLevel", ESP_LOG_INFO);
     esp_log_level_set("RecordingStatus", ESP_LOG_INFO);
+=======
+    esp_log_level_set("*", ESP_LOG_WARN);
+    esp_log_level_set(TAG, ESP_LOG_INFO);
+>>>>>>> parent of 33a0248 (STT(using_the_button) - ing)
 
     EXIT_FLAG = xEventGroupCreate();
 
@@ -181,6 +189,7 @@ void app_main(void)
     tcpip_adapter_init();
 #endif
 
+    ESP_LOGI(TAG, "[ 1 ] Initialize Button Peripheral & Connect to wifi network");
     // Initialize peripherals management
     esp_periph_config_t periph_cfg = DEFAULT_ESP_PERIPH_SET_CONFIG();
     esp_periph_set_handle_t set = esp_periph_set_init(&periph_cfg);
@@ -194,14 +203,6 @@ void app_main(void)
     // Start wifi & button peripheral
     esp_periph_start(set, wifi_handle);
     periph_wifi_wait_for_connected(wifi_handle, portMAX_DELAY);
-
-    wifi_ap_record_t wifidata;
-
-    if (esp_wifi_sta_get_ap_info(&wifidata) == ESP_OK) {
-        ESP_LOGI(TAG, "Connected to AP: %s", CONFIG_WIFI_SSID);
-    } else {
-        ESP_LOGE(TAG, "Failed to get WiFi AP info");
-    }
 
     ESP_LOGI(TAG, "[ 2 ] Start codec chip");
     audio_board_handle_t board_handle = audio_board_init();
@@ -223,7 +224,11 @@ void app_main(void)
     i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
     i2s_cfg.type = AUDIO_STREAM_READER;
     i2s_cfg.out_rb_size = 16 * 1024; // Increase buffer to avoid missing data in bad network conditions
+<<<<<<< HEAD
     i2s_cfg.i2s_port = I2S_NUM_1;
+=======
+    i2s_cfg.i2s_port = I2S_NUM_0;
+>>>>>>> parent of 33a0248 (STT(using_the_button) - ing)
     i2s_stream_reader = i2s_stream_init(&i2s_cfg);
 
 
@@ -238,6 +243,7 @@ void app_main(void)
     i2s_stream_set_clk(i2s_stream_reader, EXAMPLE_AUDIO_SAMPLE_RATE, EXAMPLE_AUDIO_BITS, EXAMPLE_AUDIO_CHANNELS);
 
     while (1) {
+<<<<<<< HEAD
         // I2S에서 오디오 데이터 읽기
         i2s_read(I2S_NUM_1, audio_data, sizeof(audio_data), &bytes_read, portMAX_DELAY);
         ESP_LOGI("AudioData", "First 10 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
@@ -245,8 +251,15 @@ void app_main(void)
             audio_data[4], audio_data[5], audio_data[6], audio_data[7],
             audio_data[8], audio_data[9]);
         ESP_LOGI("I2SRead", "Bytes read from I2S: %zu", bytes_read);
+=======
+        // Reading audio data from I2S
+        uint8_t audio_data[1024];
+        size_t bytes_read;
 
-        // 오디오 레벨 체크 및 녹음 시작/중지
+        i2s_read(I2S_NUM_0, audio_data, sizeof(audio_data), &bytes_read, portMAX_DELAY);
+>>>>>>> parent of 33a0248 (STT(using_the_button) - ing)
+
+        // Audio level check and start/stop recording
         check_audio_level_and_record(audio_data, bytes_read);
         }
 

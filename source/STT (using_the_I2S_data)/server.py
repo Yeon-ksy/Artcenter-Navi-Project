@@ -4,16 +4,9 @@ import argparse
 import socket
 import requests
 
-if sys.version_info.major == 3:
-    # Python3
-    from urllib import parse
-    from http.server import HTTPServer
-    from http.server import BaseHTTPRequestHandler
-else:
-    # Python2
-    import urlparse
-    from BaseHTTPServer import HTTPServer
-    from BaseHTTPServer import BaseHTTPRequestHandler
+from urllib import parse
+from http.server import HTTPServer
+from http.server import BaseHTTPRequestHandler
 
 PORT = 8000
 last_recorded_file = None # Variable to store the name of the last recorded file
@@ -22,7 +15,7 @@ def apply_STT(filename):
     client_id = "Inter your client id"
     client_secret = "Inter your client secret"
     lang = "Kor"
-    url = "https://naveropenapi.apigw-pub.fin-ntruss.com/recog/v1/stt?lang=" + lang
+    url = "https://naveropenapi.apigw.ntruss.com/recog/v1/stt?lang=" + lang
     with open(filename, 'rb') as data:
         headers = {
             "X-NCP-APIGW-API-KEY-ID": client_id,
@@ -76,10 +69,8 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"Deleted previous file {last_recorded_file}")
             except Exception as e:
                 print(f"Error deleting previous file {last_recorded_file}: {e}")
-        if sys.version_info.major == 3:
-            urlparts = parse.urlparse(self.path)
-        else:
-            urlparts = urlparse.urlparse(self.path)
+                
+        urlparts = parse.urlparse(self.path)
         request_file_path = urlparts.path.strip('/')
         total_bytes = 0
         sample_rates = 0

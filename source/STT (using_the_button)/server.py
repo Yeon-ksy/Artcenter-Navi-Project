@@ -9,15 +9,14 @@ from urllib import parse
 from http.server import HTTPServer
 from http.server import BaseHTTPRequestHandler
 
-
 PORT = 8000
-last_recorded_file = None 
+last_recorded_file = None
 
 def apply_STT(filename):
-    client_id = "Enter id"
-    client_secret = "Enter secret"
+    client_id = "Inter your client id"
+    client_secret = "Inter your client secret"
     lang = "Kor"
-    url = "https://naveropenapi.apigw-pub.fin-ntruss.com/recog/v1/stt?lang=" + lang
+    url = "https://naveropenapi.apigw.ntruss.com/recog/v1/stt?lang=" + lang
     with open(filename, 'rb') as data:
         headers = {
             "X-NCP-APIGW-API-KEY-ID": client_id,
@@ -63,18 +62,16 @@ class Handler(BaseHTTPRequestHandler):
         return filename
 
     def do_POST(self):
-        global last_recorded_file
+        global last_recorded_file 
 
         if last_recorded_file and os.path.exists(last_recorded_file):
             try:
-                os.remove(last_recorded_file)
+                os.remove(last_recorded_file) 
                 print(f"Deleted previous file {last_recorded_file}")
             except Exception as e:
                 print(f"Error deleting previous file {last_recorded_file}: {e}")
-        if sys.version_info.major == 3:
-            urlparts = parse.urlparse(self.path)
-        else:
-            urlparts = urlparse.urlparse(self.path)
+
+        urlparts = parse.urlparse(self.path)
         request_file_path = urlparts.path.strip('/')
         total_bytes = 0
         sample_rates = 0
